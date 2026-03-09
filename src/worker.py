@@ -60,7 +60,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v24", "tools_loaded": len(CONFIG['CLAUDE_CODE_TOOLS'])}))
+                return make_response(json.dumps({"status": "ok", "version": "v25", "tools_loaded": len(CONFIG['CLAUDE_CODE_TOOLS'])}))
 
             if path == "/config" and method == "GET":
                 return make_response(json.dumps(CONFIG, indent=4, ensure_ascii=False))
@@ -76,15 +76,18 @@ class Default(WorkerEntrypoint):
             return make_response(json.dumps({"error": {"message": str(e), "trace": traceback.format_exc()}}), status=500)
 
     async def debug_proxy(self, request):
-        """调试端点：显示收到的头和转发的头，做一次最小请求"""
-        info = {"step": "init", "received_headers": {}, "sent_headers": {}, "upstream_status": None, "upstream_body": None}
+        """调试端点：显示所有收到的头"""
+        info = {"step": "init", "all_received_headers": {}, "sent_headers": {}, "upstream_status": None, "upstream_body": None}
         try:
-            # 收到的请求头
-            for key in ["authorization", "x-api-key", "content-type", "user-agent"]:
-                val = request.headers.get(key)
-                if val:
-                    v = str(val)
-                    info["received_headers"][key] = v[:20] + "..." if len(v) > 20 else v
+            # 遍历所有收到的请求头
+            entries = request.headers.entries()
+            while True:
+                n = entries.next()
+                if n.done:
+                    break
+                key = str(n.value[0])
+                val = str(n.value[1])
+                info["all_received_headers"][key] = val[:40] + "..." if len(val) > 40 else val
 
             # 构建转发头
             info["step"] = "build_headers"
@@ -189,6 +192,21 @@ class Default(WorkerEntrypoint):
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
 
+        # 收集调试信息（错误时返回）
+        debug_info = {"has_api_key": api_key is not None, "api_key_preview": (api_key[:8] + "..." + api_key[-4:]) if api_key else "NONE"}
+        try:
+            entries = request.headers.entries()
+            recv_h = {}
+            while True:
+                n = entries.next()
+                if n.done:
+                    break
+                k, v = str(n.value[0]), str(n.value[1])
+                recv_h[k] = v[:30] + "..." if len(v) > 30 else v
+            debug_info["received_headers"] = recv_h
+        except:
+            pass
+
         if CONFIG['DEBUG_MODE']:
             print(f"\n{'=' * 60}")
             print(f"[PROXY] Target: {target_path}")
@@ -226,7 +244,15 @@ class Default(WorkerEntrypoint):
                     error_text = await resp.text()
                     if CONFIG['DEBUG_MODE']:
                         print(f"[PROXY] Error: {error_text[:500]}")
-                    return make_response(error_text, status=status)
+                    # 返回上游错误 + 调试信息
+                    combined = json.dumps({
+                        "upstream_status": status,
+                        "upstream_error": error_text[:1000],
+                        "debug_info": debug_info,
+                        "target": target_path,
+                        "model": model_name,
+                    }, ensure_ascii=False, indent=2)
+                    return make_response(combined, status=status)
 
                 if wants_stream:
                     stream_headers = {
