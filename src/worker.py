@@ -13,7 +13,7 @@ from workers import WorkerEntrypoint
 
 _TOOLS_JSON_STR = r"""[{"name":"Task","description":"Launch a new agent.","input_schema":{"type":"object","properties":{"description":{"type":"string"},"prompt":{"type":"string"},"subagent_type":{"type":"string"},"model":{"type":"string","enum":["sonnet","opus","haiku"]},"resume":{"type":"string"},"run_in_background":{"type":"boolean"}},"required":["description","prompt","subagent_type"]}},{"name":"TaskOutput","description":"Retrieves output from a running or completed task.","input_schema":{"type":"object","properties":{"task_id":{"type":"string"},"block":{"type":"boolean","default":true},"timeout":{"type":"number","default":30000}},"required":["task_id"]}},{"name":"Bash","description":"Executes a bash command.","input_schema":{"type":"object","properties":{"command":{"type":"string"},"timeout":{"type":"number"},"description":{"type":"string"}},"required":["command"]}},{"name":"Glob","description":"Fast file pattern matching.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"}},"required":["pattern"]}},{"name":"Grep","description":"Search tool built on ripgrep.","input_schema":{"type":"object","properties":{"pattern":{"type":"string"},"path":{"type":"string"},"glob":{"type":"string"},"output_mode":{"type":"string"}},"required":["pattern"]}},{"name":"Read","description":"Reads a file from the filesystem.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"offset":{"type":"number"},"limit":{"type":"number"}},"required":["file_path"]}},{"name":"Edit","description":"Performs exact string replacements in files.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"old_string":{"type":"string"},"new_string":{"type":"string"},"replace_all":{"type":"boolean","default":false}},"required":["file_path","old_string","new_string"]}},{"name":"Write","description":"Writes a file to the filesystem.","input_schema":{"type":"object","properties":{"file_path":{"type":"string"},"content":{"type":"string"}},"required":["file_path","content"]}},{"name":"WebFetch","description":"Fetches content from a URL.","input_schema":{"type":"object","properties":{"url":{"type":"string","format":"uri"},"prompt":{"type":"string"}},"required":["url","prompt"]}},{"name":"WebSearch","description":"Search the web.","input_schema":{"type":"object","properties":{"query":{"type":"string"}},"required":["query"]}},{"name":"AskUserQuestion","description":"Ask the user a question.","input_schema":{"type":"object","properties":{"questions":{"type":"array","items":{"type":"object"}}},"required":["questions"]}}]"""
 
-_SYSTEM_JSON_STR = r"""[{"type":"text","text":"You are Claude Code, Anthropic's official CLI for Claude.","cache_control":{"type":"ephemeral"}},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.","cache_control":{"type":"ephemeral"}}]"""
+_SYSTEM_JSON_STR = r""""You are Claude Code, Anthropic's official CLI for Claude. You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.""""
 
 # 验证预序列化的 JSON 是合法的（snapshot 阶段执行）
 _tools_count = len(json.loads(_TOOLS_JSON_STR))
@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v33", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v34", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -256,60 +256,57 @@ class Default(WorkerEntrypoint):
         return make_response(json.dumps(steps, indent=2, ensure_ascii=False))
 
     async def test_notool(self, request):
-        """A/B 测试不同 system 格式"""
+        """A/B 测试关键字段"""
         results = {}
         api_key = extract_api_key(request)
-        headers = get_claude_headers(model="claude-opus-4-6")
+        headers = get_claude_headers(is_stream=True, model="claude-opus-4-6")
         if api_key:
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
 
-        base_body = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR
-
-        # 测试1：tools + system 数组（含 cache_control）— 当前方式
+        # 测试1：tools + stream:true + 字符串 system（避免 520）
         js_h1 = JsHeaders.new()
         for k, v in headers.items():
             js_h1.set(k, str(v))
-        body1 = base_body + ',"system":' + _SYSTEM_JSON_STR + '}'
+        body1 = '{"model":"claude-opus-4-6","max_tokens":50,"stream":true,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR + ',"system":"You are Claude Code, Anthropic\'s official CLI for Claude. You are an interactive CLI tool that helps users with software engineering tasks."}'
         try:
             r1 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h1, "body": body1}, dict_converter=Object.fromEntries))
-            results["array_with_cache"] = {"status": r1.status, "body": (await r1.text())[:200]}
+            results["stream_str_sys"] = {"status": r1.status, "body": (await r1.text())[:300]}
         except Exception as e:
-            results["array_with_cache"] = {"error": str(e)}
+            results["stream_str_sys"] = {"error": str(e)}
 
-        # 测试2：tools + system 数组（不含 cache_control）
+        # 测试2：tools + stream:true + tool_choice:auto + 字符串 system
         js_h2 = JsHeaders.new()
         for k, v in headers.items():
             js_h2.set(k, str(v))
-        sys2 = '[{"type":"text","text":"You are Claude Code, Anthropic\'s official CLI for Claude."},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks."}]'
-        body2 = base_body + ',"system":' + sys2 + '}'
+        body2 = '{"model":"claude-opus-4-6","max_tokens":50,"stream":true,"tool_choice":{"type":"auto"},"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR + ',"system":"You are Claude Code, Anthropic\'s official CLI for Claude."}'
         try:
             r2 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h2, "body": body2}, dict_converter=Object.fromEntries))
-            results["array_no_cache"] = {"status": r2.status, "body": (await r2.text())[:200]}
+            results["stream_toolchoice"] = {"status": r2.status, "body": (await r2.text())[:300]}
         except Exception as e:
-            results["array_no_cache"] = {"error": str(e)}
+            results["stream_toolchoice"] = {"error": str(e)}
 
-        # 测试3：tools + system 纯字符串
+        # 测试3：最小有效请求 - tools + stream:true 不带 system/thinking/metadata
         js_h3 = JsHeaders.new()
         for k, v in headers.items():
             js_h3.set(k, str(v))
-        body3 = base_body + ',"system":"You are Claude Code, Anthropic\'s official CLI for Claude."}'
+        body3 = '{"model":"claude-opus-4-6","max_tokens":50,"stream":true,"messages":[{"role":"user","content":"hi"}],"tools":' + _TOOLS_JSON_STR + '}'
         try:
             r3 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h3, "body": body3}, dict_converter=Object.fromEntries))
-            results["string_system"] = {"status": r3.status, "body": (await r3.text())[:200]}
+            results["minimal_stream"] = {"status": r3.status, "body": (await r3.text())[:300]}
         except Exception as e:
-            results["string_system"] = {"error": str(e)}
+            results["minimal_stream"] = {"error": str(e)}
 
-        # 测试4：tools 不带 system 不带 thinking
+        # 测试4：不带 tools，只有 stream:true
         js_h4 = JsHeaders.new()
         for k, v in headers.items():
             js_h4.set(k, str(v))
-        body4 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"tools":' + _TOOLS_JSON_STR + '}'
+        body4 = '{"model":"claude-opus-4-6","max_tokens":50,"stream":true,"messages":[{"role":"user","content":"hi"}]}'
         try:
             r4 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h4, "body": body4}, dict_converter=Object.fromEntries))
-            results["tools_no_think_no_sys"] = {"status": r4.status, "body": (await r4.text())[:200]}
+            results["stream_only"] = {"status": r4.status, "body": (await r4.text())[:300]}
         except Exception as e:
-            results["tools_no_think_no_sys"] = {"error": str(e)}
+            results["stream_only"] = {"error": str(e)}
 
         return make_response(json.dumps(results, indent=2, ensure_ascii=False))
 
