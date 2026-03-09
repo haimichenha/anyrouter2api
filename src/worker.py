@@ -4,7 +4,8 @@ import sys
 import traceback
 
 import asgi
-import httpx
+from js import fetch as js_fetch, Headers as JsHeaders, Object
+from pyodide.ffi import to_js
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import StreamingResponse
 from workers import WorkerEntrypoint
@@ -47,25 +48,31 @@ def get_claude_headers(is_stream=False, model=""):
     return headers
 
 
-def create_async_client():
-    return httpx.AsyncClient(
-        http2=True,
-        verify=False,
-        timeout=httpx.Timeout(connect=60.0, read=300.0, write=60.0, pool=300.0),
-        proxy=None,
-        limits=httpx.Limits(max_connections=20, max_keepalive_connections=10)
-    )
+async def do_fetch(method, url, headers_dict, body_json=None):
+    """使用 JS fetch API 发起 HTTP 请求"""
+    h = JsHeaders.new()
+    for k, v in headers_dict.items():
+        h.set(k, str(v))
+    options = {"method": method, "headers": h}
+    if body_json is not None:
+        options["body"] = json.dumps(body_json)
+    resp = await js_fetch(url, to_js(options, dict_converter=Object.fromEntries))
+    return resp
 
 
-CLIENT = create_async_client()
-
-
-async def stream_response(resp):
+async def stream_js_response(js_response):
+    """从 JS Response 的 ReadableStream 逐块读取"""
+    reader = js_response.body.getReader()
     try:
-        async for chunk in resp.aiter_bytes():
-            yield chunk
+        while True:
+            result = await reader.read()
+            if result.done:
+                break
+            yield bytes(result.value)
     except Exception as e:
         print(f"[PROXY] Stream error: {e}")
+    finally:
+        reader.releaseLock()
 
 
 @app.get("/config")
@@ -83,7 +90,6 @@ async def root():
 
 @app.api_route("/v1/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"])
 async def proxy(path: str, request: Request):
-    global CLIENT
     target_path = f"{CONFIG['TARGET_BASE_URL']}/{path}"
     if path == "messages":
         target_path += "?beta=true"
@@ -144,48 +150,34 @@ async def proxy(path: str, request: Request):
             if CONFIG['DEBUG_MODE']:
                 print(f"[PROXY] Attempt {attempt + 1}/{max_attempts}...")
                 sys.stdout.flush()
-            req = CLIENT.build_request(request.method, target_path, headers=headers, json=body_json, timeout=None)
-            if wants_stream:
-                resp = await CLIENT.send(req, stream=True)
+            resp = await do_fetch(request.method, target_path, headers, body_json)
+            status = resp.status
+            if CONFIG['DEBUG_MODE']:
+                print(f"[PROXY] Status: {status}")
+            if status in [520, 502]:
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(retry_delay)
+                    continue
+                return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502,
+                                media_type="application/json")
+            if status in [403, 500]:
+                error_text = await resp.text()
                 if CONFIG['DEBUG_MODE']:
-                    print(f"[PROXY] Status: {resp.status_code}")
-                if resp.status_code in [520, 502]:
-                    await resp.aclose()
-                    if attempt < max_attempts - 1:
-                        CLIENT = create_async_client()
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502,
-                                    media_type="application/json")
-                if resp.status_code in [403, 500]:
-                    error_content = await resp.aread()
-                    await resp.aclose()
-                    if CONFIG['DEBUG_MODE']:
-                        print(f"[PROXY] Error response: {error_content.decode('utf-8', errors='ignore')[:500]}")
-                    return Response(content=error_content, status_code=resp.status_code, media_type="application/json")
-                return StreamingResponse(stream_response(resp), status_code=resp.status_code,
+                    print(f"[PROXY] Error response: {error_text[:500]}")
+                return Response(content=error_text.encode('utf-8'), status_code=status, media_type="application/json")
+            if wants_stream:
+                return StreamingResponse(stream_js_response(resp), status_code=status,
                                          media_type="text/event-stream",
                                          headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
             else:
-                resp = await CLIENT.send(req)
-                if CONFIG['DEBUG_MODE']:
-                    print(f"[PROXY] Status: {resp.status_code}")
-                if resp.status_code in [520, 502]:
-                    if attempt < max_attempts - 1:
-                        CLIENT = create_async_client()
-                        await asyncio.sleep(retry_delay)
-                        continue
-                    return Response(content=b'{"error":{"message":"Network error after max retries"}}', status_code=502,
-                                    media_type="application/json")
-                if resp.status_code in [403, 500]:
-                    return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
-                return Response(content=resp.content, status_code=resp.status_code, media_type="application/json")
+                content = await resp.text()
+                return Response(content=content.encode('utf-8'), status_code=status, media_type="application/json")
         except Exception as e:
             if CONFIG['DEBUG_MODE']:
                 print(f"[PROXY] Error: {type(e).__name__}: {e}")
                 traceback.print_exc()
             if attempt < max_attempts - 1:
-                CLIENT = create_async_client()
+                await asyncio.sleep(retry_delay)
             else:
                 return Response(content=json.dumps({"error": {"message": str(e)}}), status_code=500)
     return None
