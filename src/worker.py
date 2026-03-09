@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v31", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v32", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -143,6 +143,9 @@ class Default(WorkerEntrypoint):
 
             if path == "/test-fetch":
                 return await self.test_fetch(request)
+
+            if path == "/test-notool":
+                return await self.test_notool(request)
 
             if path.startswith("/v1/"):
                 return await self.handle_proxy(request, path, method)
@@ -251,6 +254,54 @@ class Default(WorkerEntrypoint):
             steps["trace"] = traceback.format_exc()
 
         return make_response(json.dumps(steps, indent=2, ensure_ascii=False))
+
+    async def test_notool(self, request):
+        """测试发送不带 tools 但带其他 Claude Code 特征的请求"""
+        results = {}
+        api_key = extract_api_key(request)
+        headers = get_claude_headers(model="claude-opus-4-6")
+        if api_key:
+            headers["x-api-key"] = api_key
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        js_h = JsHeaders.new()
+        for k, v in headers.items():
+            js_h.set(k, str(v))
+
+        # 测试1：完全不带 tools
+        body1 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"}}'
+        opts1 = to_js({"method": "POST", "headers": js_h, "body": body1}, dict_converter=Object.fromEntries)
+        try:
+            r1 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts1)
+            results["no_tools"] = {"status": r1.status, "body": (await r1.text())[:300]}
+        except Exception as e:
+            results["no_tools"] = {"error": str(e)}
+
+        # 测试2：带 tools + system（完整注入）
+        js_h2 = JsHeaders.new()
+        for k, v in headers.items():
+            js_h2.set(k, str(v))
+        body2 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR + ',"system":' + _SYSTEM_JSON_STR + '}'
+        opts2 = to_js({"method": "POST", "headers": js_h2, "body": body2}, dict_converter=Object.fromEntries)
+        try:
+            r2 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts2)
+            results["with_tools"] = {"status": r2.status, "body": (await r2.text())[:300]}
+        except Exception as e:
+            results["with_tools"] = {"error": str(e)}
+
+        # 测试3：只带 tools 不带 system
+        js_h3 = JsHeaders.new()
+        for k, v in headers.items():
+            js_h3.set(k, str(v))
+        body3 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR + '}'
+        opts3 = to_js({"method": "POST", "headers": js_h3, "body": body3}, dict_converter=Object.fromEntries)
+        try:
+            r3 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts3)
+            results["tools_only"] = {"status": r3.status, "body": (await r3.text())[:300]}
+        except Exception as e:
+            results["tools_only"] = {"error": str(e)}
+
+        return make_response(json.dumps(results, indent=2, ensure_ascii=False))
 
     async def handle_proxy(self, request, path, method):
         sub_path = path[4:]
