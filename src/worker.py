@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v34", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v35", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
