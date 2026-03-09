@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v30", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v31", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -260,7 +260,6 @@ class Default(WorkerEntrypoint):
 
         # 提取 API key
         api_key = extract_api_key(request)
-        debug_info = collect_debug_info(request, api_key)
 
         # 解析并构建 body（CPU 敏感 - 使用字符串拼接优化）
         body_str = ""
@@ -270,68 +269,40 @@ class Default(WorkerEntrypoint):
             body_text = await request.text()
             body_str, model_name, wants_stream = build_body_string(body_text)
         except Exception as e:
-            debug_info["body_parse_error"] = str(e)
+            return make_response(json.dumps({"error": f"body_parse: {e}"}), status=400)
 
-        # 构建转发头（dict 形式，每次重试时转为 JS）
+        # 构建转发头
         headers = get_claude_headers(is_stream=wants_stream, model=model_name)
         if api_key:
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
 
-        # 重试逻辑（每次重新构建 fetch options，因为 JS 对象不可重用）
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            try:
-                js_h = JsHeaders.new()
-                for k, v in headers.items():
-                    js_h.set(k, str(v))
-                fi = {"method": method, "headers": js_h}
-                if body_str and method in ("POST", "PUT", "PATCH"):
-                    fi["body"] = body_str
-                opts = to_js(fi, dict_converter=Object.fromEntries)
+        try:
+            js_h = JsHeaders.new()
+            for k, v in headers.items():
+                js_h.set(k, str(v))
+            fi = {"method": method, "headers": js_h}
+            if body_str and method in ("POST", "PUT", "PATCH"):
+                fi["body"] = body_str
+            opts = to_js(fi, dict_converter=Object.fromEntries)
 
-                resp = await js_fetch(target_path, opts)
-                status = resp.status
+            resp = await js_fetch(target_path, opts)
+            status = resp.status
 
-                if status in (520, 502):
-                    error_body = await resp.text()
-                    if attempt < max_attempts - 1:
-                        await asyncio.sleep(1)
-                        continue
-                    return make_response(json.dumps({
-                        "error": "Network error after max retries",
-                        "last_status": status,
-                        "last_body": error_body[:500],
-                        "debug_info": debug_info,
-                    }, ensure_ascii=False), status=502)
+            # 流式响应直接透传
+            if wants_stream and status == 200:
+                h = JsHeaders.new()
+                h.set("content-type", "text/event-stream")
+                h.set("cache-control", "no-cache")
+                h.set("x-accel-buffering", "no")
+                return JsResponse.new(
+                    resp.body,
+                    to_js({"status": status, "headers": h}, dict_converter=Object.fromEntries)
+                )
 
-                if status in (403, 500):
-                    error_text = await resp.text()
-                    combined = json.dumps({
-                        "upstream_status": status,
-                        "upstream_error": error_text[:1000],
-                        "debug_info": debug_info,
-                        "target": target_path,
-                        "model": model_name,
-                    }, ensure_ascii=False)
-                    return make_response(combined, status=status)
+            # 非流式：读取并转发所有响应（包括错误）
+            content = await resp.text()
+            return make_response(content, status=status)
 
-                if wants_stream:
-                    h = JsHeaders.new()
-                    h.set("content-type", "text/event-stream")
-                    h.set("cache-control", "no-cache")
-                    h.set("x-accel-buffering", "no")
-                    return JsResponse.new(
-                        resp.body,
-                        to_js({"status": status, "headers": h}, dict_converter=Object.fromEntries)
-                    )
-                else:
-                    content = await resp.text()
-                    return make_response(content, status=status)
-
-            except Exception as e:
-                if attempt >= max_attempts - 1:
-                    return make_response(json.dumps({"error": str(e), "debug_info": debug_info}), status=500)
-                await asyncio.sleep(1)
-
-        return make_response('{"error":"Unexpected"}', status=500)
+        except Exception as e:
+            return make_response(json.dumps({"error": str(e), "trace": traceback.format_exc()}), status=500)
