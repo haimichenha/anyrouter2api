@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v32", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v33", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -256,7 +256,7 @@ class Default(WorkerEntrypoint):
         return make_response(json.dumps(steps, indent=2, ensure_ascii=False))
 
     async def test_notool(self, request):
-        """测试发送不带 tools 但带其他 Claude Code 特征的请求"""
+        """A/B 测试不同 system 格式"""
         results = {}
         api_key = extract_api_key(request)
         headers = get_claude_headers(model="claude-opus-4-6")
@@ -264,42 +264,52 @@ class Default(WorkerEntrypoint):
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
 
-        js_h = JsHeaders.new()
+        base_body = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR
+
+        # 测试1：tools + system 数组（含 cache_control）— 当前方式
+        js_h1 = JsHeaders.new()
         for k, v in headers.items():
-            js_h.set(k, str(v))
-
-        # 测试1：完全不带 tools
-        body1 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"}}'
-        opts1 = to_js({"method": "POST", "headers": js_h, "body": body1}, dict_converter=Object.fromEntries)
+            js_h1.set(k, str(v))
+        body1 = base_body + ',"system":' + _SYSTEM_JSON_STR + '}'
         try:
-            r1 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts1)
-            results["no_tools"] = {"status": r1.status, "body": (await r1.text())[:300]}
+            r1 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h1, "body": body1}, dict_converter=Object.fromEntries))
+            results["array_with_cache"] = {"status": r1.status, "body": (await r1.text())[:200]}
         except Exception as e:
-            results["no_tools"] = {"error": str(e)}
+            results["array_with_cache"] = {"error": str(e)}
 
-        # 测试2：带 tools + system（完整注入）
+        # 测试2：tools + system 数组（不含 cache_control）
         js_h2 = JsHeaders.new()
         for k, v in headers.items():
             js_h2.set(k, str(v))
-        body2 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR + ',"system":' + _SYSTEM_JSON_STR + '}'
-        opts2 = to_js({"method": "POST", "headers": js_h2, "body": body2}, dict_converter=Object.fromEntries)
+        sys2 = '[{"type":"text","text":"You are Claude Code, Anthropic\'s official CLI for Claude."},{"type":"text","text":"You are an interactive CLI tool that helps users with software engineering tasks."}]'
+        body2 = base_body + ',"system":' + sys2 + '}'
         try:
-            r2 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts2)
-            results["with_tools"] = {"status": r2.status, "body": (await r2.text())[:300]}
+            r2 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h2, "body": body2}, dict_converter=Object.fromEntries))
+            results["array_no_cache"] = {"status": r2.status, "body": (await r2.text())[:200]}
         except Exception as e:
-            results["with_tools"] = {"error": str(e)}
+            results["array_no_cache"] = {"error": str(e)}
 
-        # 测试3：只带 tools 不带 system
+        # 测试3：tools + system 纯字符串
         js_h3 = JsHeaders.new()
         for k, v in headers.items():
             js_h3.set(k, str(v))
-        body3 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"thinking":{"budget_tokens":10000,"type":"enabled"},"metadata":{"user_id":"proxy_user"},"tools":' + _TOOLS_JSON_STR + '}'
-        opts3 = to_js({"method": "POST", "headers": js_h3, "body": body3}, dict_converter=Object.fromEntries)
+        body3 = base_body + ',"system":"You are Claude Code, Anthropic\'s official CLI for Claude."}'
         try:
-            r3 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts3)
-            results["tools_only"] = {"status": r3.status, "body": (await r3.text())[:300]}
+            r3 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h3, "body": body3}, dict_converter=Object.fromEntries))
+            results["string_system"] = {"status": r3.status, "body": (await r3.text())[:200]}
         except Exception as e:
-            results["tools_only"] = {"error": str(e)}
+            results["string_system"] = {"error": str(e)}
+
+        # 测试4：tools 不带 system 不带 thinking
+        js_h4 = JsHeaders.new()
+        for k, v in headers.items():
+            js_h4.set(k, str(v))
+        body4 = '{"model":"claude-opus-4-6","max_tokens":50,"messages":[{"role":"user","content":"hi"}],"tools":' + _TOOLS_JSON_STR + '}'
+        try:
+            r4 = await js_fetch("https://anyrouter.top/v1/messages?beta=true", to_js({"method": "POST", "headers": js_h4, "body": body4}, dict_converter=Object.fromEntries))
+            results["tools_no_think_no_sys"] = {"status": r4.status, "body": (await r4.text())[:200]}
+        except Exception as e:
+            results["tools_no_think_no_sys"] = {"error": str(e)}
 
         return make_response(json.dumps(results, indent=2, ensure_ascii=False))
 
