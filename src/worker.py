@@ -60,17 +60,80 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v23", "tools_loaded": len(CONFIG['CLAUDE_CODE_TOOLS'])}))
+                return make_response(json.dumps({"status": "ok", "version": "v24", "tools_loaded": len(CONFIG['CLAUDE_CODE_TOOLS'])}))
 
             if path == "/config" and method == "GET":
                 return make_response(json.dumps(CONFIG, indent=4, ensure_ascii=False))
+
+            if path == "/debug":
+                return await self.debug_proxy(request)
 
             if path.startswith("/v1/"):
                 return await self.handle_proxy(request, path, method)
 
             return make_response('{"error":"Not Found"}', status=404)
         except Exception as e:
-            return make_response(json.dumps({"error": {"message": str(e)}}), status=500)
+            return make_response(json.dumps({"error": {"message": str(e), "trace": traceback.format_exc()}}), status=500)
+
+    async def debug_proxy(self, request):
+        """调试端点：显示收到的头和转发的头，做一次最小请求"""
+        info = {"step": "init", "received_headers": {}, "sent_headers": {}, "upstream_status": None, "upstream_body": None}
+        try:
+            # 收到的请求头
+            for key in ["authorization", "x-api-key", "content-type", "user-agent"]:
+                val = request.headers.get(key)
+                if val:
+                    v = str(val)
+                    info["received_headers"][key] = v[:20] + "..." if len(v) > 20 else v
+
+            # 构建转发头
+            info["step"] = "build_headers"
+            headers = get_claude_headers(model="claude-opus-4-6")
+            api_key = None
+            req_auth = request.headers.get("Authorization")
+            if req_auth:
+                api_key = str(req_auth).replace("Bearer ", "")
+                info["auth_source"] = "Authorization header"
+            else:
+                raw_key = request.headers.get("x-api-key")
+                if raw_key:
+                    api_key = str(raw_key)
+                    info["auth_source"] = "x-api-key header"
+                else:
+                    info["auth_source"] = "NONE - no auth found!"
+
+            if api_key:
+                headers["x-api-key"] = api_key
+                headers["Authorization"] = f"Bearer {api_key}"
+                info["api_key_preview"] = api_key[:8] + "..." + api_key[-4:]
+
+            for k, v in headers.items():
+                info["sent_headers"][k] = v[:30] + "..." if len(v) > 30 else v
+
+            # 最小请求
+            info["step"] = "fetch"
+            js_h = JsHeaders.new()
+            for k, v in headers.items():
+                js_h.set(k, str(v))
+
+            body = json.dumps({"model": "claude-opus-4-6", "max_tokens": 10, "messages": [{"role": "user", "content": "hi"}]})
+            opts = to_js({"method": "POST", "headers": js_h, "body": body}, dict_converter=Object.fromEntries)
+
+            info["step"] = "awaiting_fetch"
+            resp = await js_fetch("https://anyrouter.top/v1/messages?beta=true", opts)
+            info["upstream_status"] = resp.status
+
+            info["step"] = "reading_body"
+            resp_text = await resp.text()
+            info["upstream_body"] = resp_text[:500]
+            info["step"] = "done"
+
+        except Exception as e:
+            info["error"] = str(e)
+            info["error_type"] = type(e).__name__
+            info["trace"] = traceback.format_exc()
+
+        return make_response(json.dumps(info, indent=2, ensure_ascii=False))
 
     async def handle_proxy(self, request, path, method):
         sub_path = path[4:]
