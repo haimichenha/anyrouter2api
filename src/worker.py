@@ -130,13 +130,16 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v27", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v28", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
 
             if path == "/debug":
                 return await self.debug_proxy(request)
+
+            if path == "/test-body":
+                return await self.test_body_build(request)
 
             if path.startswith("/v1/"):
                 return await self.handle_proxy(request, path, method)
@@ -180,6 +183,21 @@ class Default(WorkerEntrypoint):
             info["trace"] = traceback.format_exc()
 
         return make_response(json.dumps(info, indent=2, ensure_ascii=False))
+
+    async def test_body_build(self, request):
+        """测试 body 构建（不发 fetch），隔离 CPU 超时问题"""
+        try:
+            body_text = await request.text()
+            body_str, model, stream = build_body_string(body_text)
+            return make_response(json.dumps({
+                "body_length": len(body_str),
+                "model": model,
+                "stream": stream,
+                "body_preview": body_str[:200] + "..." if len(body_str) > 200 else body_str,
+                "body_end": body_str[-100:] if len(body_str) > 100 else "",
+            }))
+        except Exception as e:
+            return make_response(json.dumps({"error": str(e), "trace": traceback.format_exc()}), status=500)
 
     async def handle_proxy(self, request, path, method):
         sub_path = path[4:]
