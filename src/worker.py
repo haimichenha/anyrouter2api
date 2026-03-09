@@ -113,13 +113,18 @@ class Default(WorkerEntrypoint):
         model_name = body_json.get('model', '')
         headers = get_claude_headers(is_stream=wants_stream, model=model_name)
 
+        # 提取 API key，同时以 x-api-key (Anthropic) 和 Authorization (OpenAI) 两种格式发送
+        api_key = None
         req_auth = request.headers.get("Authorization")
         if req_auth:
-            headers["Authorization"] = str(req_auth)
+            api_key = str(req_auth).replace("Bearer ", "")
         else:
-            api_key = request.headers.get("x-api-key")
-            if api_key:
-                headers["Authorization"] = f"Bearer {api_key}"
+            raw_key = request.headers.get("x-api-key")
+            if raw_key:
+                api_key = str(raw_key)
+        if api_key:
+            headers["x-api-key"] = api_key
+            headers["Authorization"] = f"Bearer {api_key}"
 
         if CONFIG['DEBUG_MODE']:
             print(f"\n{'=' * 60}")
