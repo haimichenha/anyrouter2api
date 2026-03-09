@@ -60,7 +60,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v25", "tools_loaded": len(CONFIG['CLAUDE_CODE_TOOLS'])}))
+                return make_response(json.dumps({"status": "ok", "version": "v26", "tools_loaded": len(CONFIG['CLAUDE_CODE_TOOLS'])}))
 
             if path == "/config" and method == "GET":
                 return make_response(json.dumps(CONFIG, indent=4, ensure_ascii=False))
@@ -80,13 +80,8 @@ class Default(WorkerEntrypoint):
         info = {"step": "init", "all_received_headers": {}, "sent_headers": {}, "upstream_status": None, "upstream_body": None}
         try:
             # 遍历所有收到的请求头
-            entries = request.headers.entries()
-            while True:
-                n = entries.next()
-                if n.done:
-                    break
-                key = str(n.value[0])
-                val = str(n.value[1])
+            for key, val in request.headers.items():
+                key, val = str(key), str(val)
                 info["all_received_headers"][key] = val[:40] + "..." if len(val) > 40 else val
 
             # 构建转发头
@@ -195,13 +190,9 @@ class Default(WorkerEntrypoint):
         # 收集调试信息（错误时返回）
         debug_info = {"has_api_key": api_key is not None, "api_key_preview": (api_key[:8] + "..." + api_key[-4:]) if api_key else "NONE"}
         try:
-            entries = request.headers.entries()
             recv_h = {}
-            while True:
-                n = entries.next()
-                if n.done:
-                    break
-                k, v = str(n.value[0]), str(n.value[1])
+            for k, v in request.headers.items():
+                k, v = str(k), str(v)
                 recv_h[k] = v[:30] + "..." if len(v) > 30 else v
             debug_info["received_headers"] = recv_h
         except:
