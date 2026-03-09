@@ -31,18 +31,16 @@ def make_response(body, status=200, content_type="application/json"):
 
 def get_claude_headers(is_stream=False, model=""):
     if "opus" in model.lower() or "sonnet" in model.lower():
-        beta = "claude-code-20250219,interleaved-thinking-2025-05-14"
+        beta = "interleaved-thinking-2025-05-14,code-20250219"
     else:
         beta = "interleaved-thinking-2025-05-14"
     headers = {
         "accept": "application/json",
         "content-type": "application/json",
         "connection": "keep-alive",
-        "user-agent": "claude-cli/2.0.76 (external, cli)",
+        "user-agent": "AnthropicSDK/JavaScript anthropic-sdk/0.70.0 node/v24.3.0",
         "anthropic-version": "2023-06-01",
         "anthropic-beta": beta,
-        "anthropic-dangerous-direct-browser-access": "true",
-        "x-app": "cli",
         "x-stainless-arch": "x64",
         "x-stainless-lang": "js",
         "x-stainless-os": "Windows",
@@ -130,7 +128,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v35", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v36", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -333,7 +331,6 @@ class Default(WorkerEntrypoint):
         headers = get_claude_headers(is_stream=wants_stream, model=model_name)
         if api_key:
             headers["x-api-key"] = api_key
-            headers["Authorization"] = f"Bearer {api_key}"
 
         try:
             js_h = JsHeaders.new()
