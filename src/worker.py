@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v29", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v30", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -272,33 +272,38 @@ class Default(WorkerEntrypoint):
         except Exception as e:
             debug_info["body_parse_error"] = str(e)
 
-        # 构建转发头
+        # 构建转发头（dict 形式，每次重试时转为 JS）
         headers = get_claude_headers(is_stream=wants_stream, model=model_name)
         if api_key:
             headers["x-api-key"] = api_key
             headers["Authorization"] = f"Bearer {api_key}"
 
-        js_headers = JsHeaders.new()
-        for k, v in headers.items():
-            js_headers.set(k, str(v))
-
-        fetch_init = {"method": method, "headers": js_headers}
-        if body_str and method in ("POST", "PUT", "PATCH"):
-            fetch_init["body"] = body_str
-        fetch_options = to_js(fetch_init, dict_converter=Object.fromEntries)
-
-        # 重试逻辑
+        # 重试逻辑（每次重新构建 fetch options，因为 JS 对象不可重用）
         max_attempts = 3
         for attempt in range(max_attempts):
             try:
-                resp = await js_fetch(target_path, fetch_options)
+                js_h = JsHeaders.new()
+                for k, v in headers.items():
+                    js_h.set(k, str(v))
+                fi = {"method": method, "headers": js_h}
+                if body_str and method in ("POST", "PUT", "PATCH"):
+                    fi["body"] = body_str
+                opts = to_js(fi, dict_converter=Object.fromEntries)
+
+                resp = await js_fetch(target_path, opts)
                 status = resp.status
 
                 if status in (520, 502):
+                    error_body = await resp.text()
                     if attempt < max_attempts - 1:
                         await asyncio.sleep(1)
                         continue
-                    return make_response('{"error":"Network error after max retries"}', status=502)
+                    return make_response(json.dumps({
+                        "error": "Network error after max retries",
+                        "last_status": status,
+                        "last_body": error_body[:500],
+                        "debug_info": debug_info,
+                    }, ensure_ascii=False), status=502)
 
                 if status in (403, 500):
                     error_text = await resp.text()
