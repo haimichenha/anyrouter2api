@@ -130,7 +130,7 @@ class Default(WorkerEntrypoint):
             method = str(request.method)
 
             if path == "/" and method == "GET":
-                return make_response(json.dumps({"status": "ok", "version": "v28", "tools_loaded": _tools_count}))
+                return make_response(json.dumps({"status": "ok", "version": "v29", "tools_loaded": _tools_count}))
 
             if path == "/config":
                 return make_response(json.dumps({"target": CONFIG["TARGET_BASE_URL"], "tools_count": _tools_count}))
@@ -140,6 +140,9 @@ class Default(WorkerEntrypoint):
 
             if path == "/test-body":
                 return await self.test_body_build(request)
+
+            if path == "/test-fetch":
+                return await self.test_fetch(request)
 
             if path.startswith("/v1/"):
                 return await self.handle_proxy(request, path, method)
@@ -198,6 +201,56 @@ class Default(WorkerEntrypoint):
             }))
         except Exception as e:
             return make_response(json.dumps({"error": str(e), "trace": traceback.format_exc()}), status=500)
+
+    async def test_fetch(self, request):
+        """分步测试完整 proxy 流程，返回每步的结果"""
+        steps = {}
+        try:
+            # Step 1: 解析 body
+            steps["step1_body"] = "start"
+            body_text = await request.text()
+            body_str, model, stream = build_body_string(body_text)
+            steps["step1_body"] = f"ok, len={len(body_str)}, model={model}"
+
+            # Step 2: 构建 headers
+            steps["step2_headers"] = "start"
+            api_key = extract_api_key(request)
+            headers = get_claude_headers(is_stream=stream, model=model)
+            if api_key:
+                headers["x-api-key"] = api_key
+                headers["Authorization"] = f"Bearer {api_key}"
+            steps["step2_headers"] = f"ok, has_key={api_key is not None}"
+
+            # Step 3: 构建 JS headers
+            steps["step3_js_headers"] = "start"
+            js_h = JsHeaders.new()
+            for k, v in headers.items():
+                js_h.set(k, str(v))
+            steps["step3_js_headers"] = "ok"
+
+            # Step 4: 构建 fetch options
+            steps["step4_fetch_opts"] = "start"
+            fetch_init = {"method": "POST", "headers": js_h, "body": body_str}
+            opts = to_js(fetch_init, dict_converter=Object.fromEntries)
+            steps["step4_fetch_opts"] = "ok"
+
+            # Step 5: 发送 fetch
+            steps["step5_fetch"] = "start"
+            target = "https://anyrouter.top/v1/messages?beta=true"
+            resp = await js_fetch(target, opts)
+            steps["step5_fetch"] = f"ok, status={resp.status}"
+
+            # Step 6: 读取响应
+            steps["step6_response"] = "start"
+            resp_text = await resp.text()
+            steps["step6_response"] = f"ok, len={len(resp_text)}"
+            steps["upstream_body_preview"] = resp_text[:300]
+
+        except Exception as e:
+            steps["error"] = str(e)
+            steps["trace"] = traceback.format_exc()
+
+        return make_response(json.dumps(steps, indent=2, ensure_ascii=False))
 
     async def handle_proxy(self, request, path, method):
         sub_path = path[4:]
